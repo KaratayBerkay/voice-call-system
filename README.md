@@ -145,13 +145,23 @@ just view the page), either:
   here), or
 - Serve it over real HTTPS instead — set `PUBLIC_SIGNALING_URL` in the root
   `.env` to your `https://` origin (see `coturn/.env.example`) and point a
-  reverse proxy at this host: `/` (or whatever path serves the `web`
-  container) to port 3002, **and** `/socket.io` on that *same* domain to
-  port 3001. Both have to be on the same origin — once the page loads over
-  https, the browser blocks a plain `http://` signaling connection as mixed
-  content, so signaling can't stay on the LAN-IP/http address even though
-  network-wise it's reachable. `VITE_TURN_URL` doesn't need this — `turn:`
-  URLs in ICE config aren't subject to mixed-content blocking. Re-run
+  reverse proxy at this host's port 3002 for that domain (a single rule,
+  same as any other static site). Once the page loads over https, the
+  browser blocks a plain `http://` signaling connection as mixed content —
+  signaling can't stay on the LAN-IP/http address even though network-wise
+  it's reachable — but that's handled *inside* the `web` container, not by
+  your reverse proxy: `vite.config.ts`'s `routeRules` proxies `/socket.io/**`
+  to `127.0.0.1:3001` server-side (the `web` and `backend` compose services
+  share the host network, so that address always reaches the backend). Your
+  proxy only ever needs the one rule to port 3002; it never needs to know
+  about port 3001. This covers the polling transport only, not the
+  WebSocket upgrade — Nitro's node preset doesn't wire raw `upgrade` events
+  through `routeRules` proxies — so the signaling socket runs on
+  long-polling instead of a persistent WebSocket. That's fine here: this
+  channel only ever carries small JSON call-setup messages (never audio,
+  which is peer-to-peer WebRTC), so the extra latency is a non-issue.
+  `VITE_TURN_URL` needs none of this — `turn:` URLs in ICE config aren't
+  subject to mixed-content blocking regardless. Re-run
   `docker compose up -d --build web` after setting `PUBLIC_SIGNALING_URL` —
   it's a Vite build arg, baked into the bundle at build time, not read at
   container start.
