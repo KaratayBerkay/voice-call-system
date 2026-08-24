@@ -16,11 +16,20 @@ Flutter A  ◀─webrtc:answer─  (relay)  ◀─webrtc:answer──  Flutter B
 Flutter A  ⇄═══════════ WebRTC audio (P2P, via STUN/TURN) ═══════════⇄ Flutter B
 ```
 
+A browser test client (`web-voice-call-client/`) speaks the exact same
+signaling protocol and can call to/from the Flutter app, or to another
+browser tab/device. It exists because a real browser's `getUserMedia`
+captures real microphone audio unconditionally, which an Android emulator's
+virtual mic cannot be relied on to do (see "Prefer the web client..." under
+Testing procedure below) — it's the fastest way to prove the
+signaling/ICE/TURN/audio pipeline actually carries real voice before
+involving physical phones.
+
 ## Layout
 
 ```
 voice-call-system/
-  docker-compose.yml             Brings up both services below together
+  docker-compose.yml             Brings up turn + backend + web together
   nestjs-backend/                 Signaling gateway (this repo, runnable standalone)
     Dockerfile
     src/modules/calls/
@@ -40,6 +49,13 @@ voice-call-system/
         voice_call_signaling_service.dart   Socket.IO client for the gateway
       domain/voice_call_controller.dart     Ties the two together + call state machine
       presentation/voice_call_screen.dart   Minimal test UI
+  web-voice-call-client/          TanStack Start browser test client
+    Dockerfile
+    src/features/voiceCall/       Port of the Flutter feature above, browser-native
+      voiceCallSignalingService.ts    socket.io-client wrapper (same events/payloads)
+      webrtcVoiceCallService.ts       Native RTCPeerConnection + getUserMedia
+      useVoiceCallController.ts       Same call state machine, as a React hook
+      VoiceCallApp.tsx                Login screen + call screen UI
 ```
 
 ## Why NestJS uses Socket.IO
@@ -95,6 +111,65 @@ loopback can physically only reach itself, so calls that need the TURN
 relay (which, on real phone networks, is most of them) will connect but
 carry no audio if this is misconfigured. This isn't a hypothetical: it's the
 exact bug hit and fixed while building this.
+
+### 2. Web test client
+
+Already running as the `web` service once step 1's `docker compose up -d
+--build` has finished — no separate command needed. Open
+`http://<this-host-LAN-IP>:3002` in a browser (any device on the same LAN,
+including this machine itself). Sign in with any user id you like (it
+doubles as the auth token, same placeholder behavior as
+`auth.service.ts` — see "Auth integration point" below), then call another
+user id that's also signed in, whether that's a second browser
+tab/window/device or the Flutter app.
+
+The `web` service's build bakes `VITE_SIGNALING_URL`/`VITE_TURN_URL`/
+`VITE_TURN_USERNAME`/`VITE_TURN_PASSWORD` in from the same root `.env` used
+by `coturn` (see `docker-compose.yml`'s `web.build.args`) — changing TURN
+credentials or the host IP means re-running `docker compose up -d --build
+web` to re-bake them, since Vite embeds `VITE_*` vars into the browser
+bundle at build time, not read at container start.
+
+**Microphone access needs a secure context.** Browsers only expose
+`navigator.mediaDevices`/`getUserMedia` on `https://` origins or
+`http://localhost` — a plain `http://<LAN-IP>:3002` (which is what every
+*other* device on your network sees this as) doesn't qualify, and the app
+will show "browser blocked mic access" instead of ever prompting for
+permission. On every device that will actually place/receive a call (not
+just view the page), either:
+- Open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enable
+  it, add `http://<this-host-LAN-IP>:3002` to the list, and relaunch the
+  browser (Chrome/Edge; Firefox has an equivalent via
+  `about:config` → `network.proxy.allow_hijacking_localhost`-adjacent
+  flags, but it's not worth the detour for a quick LAN test — use Chrome
+  here), or
+- Serve it over real HTTPS instead — set `PUBLIC_SIGNALING_URL` in the root
+  `.env` to your `https://` origin (see `coturn/.env.example`) and point a
+  reverse proxy at this host: `/` (or whatever path serves the `web`
+  container) to port 3002, **and** `/socket.io` on that *same* domain to
+  port 3001. Both have to be on the same origin — once the page loads over
+  https, the browser blocks a plain `http://` signaling connection as mixed
+  content, so signaling can't stay on the LAN-IP/http address even though
+  network-wise it's reachable. `VITE_TURN_URL` doesn't need this — `turn:`
+  URLs in ICE config aren't subject to mixed-content blocking. Re-run
+  `docker compose up -d --build web` after setting `PUBLIC_SIGNALING_URL` —
+  it's a Vite build arg, baked into the bundle at build time, not read at
+  container start.
+This only blocks the *microphone*, not the app itself — signing in,
+inviting, and the call state machine all work fine over plain HTTP; only
+`getUserMedia` cares.
+
+#### Alternative: run the web client without Docker
+
+```bash
+cd web-voice-call-client
+cp .env.example .env   # then edit the VITE_* values if not testing on localhost
+npm install
+npm run dev             # http://localhost:3002, hot-reloads on save
+```
+
+Much faster than a full `docker compose up --build` loop while iterating on
+the client itself.
 
 ### 3. Flutter integration
 
@@ -222,10 +297,14 @@ UI can show it without it re-firing on the next rebuild.
 
 ## Logging
 
-Both sides log with `[CALL]`/`[WEBRTC]` prefixes (Nest's `Logger` on the
-backend, `dart:developer log(name: 'CALL'|'WEBRTC')` on the client) — call
-routing and connection-state transitions, never TURN credentials, tokens, or
-SDP contents.
+All sides log with `[CALL]`/`[WEBRTC]` prefixes (Nest's `Logger` on the
+backend, `debugPrint` on the Flutter client, the browser console on the web
+client) — call routing and connection-state transitions, never TURN
+credentials, tokens, or SDP contents. The web client's WebRTC service also
+logs throttled `getStats()` snapshots (bytes/packets/loss/audioLevel, once
+every ~2s while connected) to the browser console — open DevTools if the
+"Remote audio level" meter isn't moving and you need to see whether packets
+are flowing at all.
 
 ## Testing procedure
 
@@ -254,6 +333,26 @@ SDP contents.
 15. Toggle airplane mode/WiFi off on one device to break its WebSocket, then
     back on — reconnect and confirm a fresh call can be placed afterward
     (the busy state should have been released by the disconnect handler).
+
+### Prefer the web client for your first end-to-end audio check
+
+Android emulators (QEMU) don't reliably deliver real host microphone audio
+into the guest's `AudioRecord`/WebRTC capture pipeline, even with
+`-allow-host-audio` enabled and a confirmed-working host audio signal — the
+transport layer (ICE/DTLS/SRTP/RTP) connects and looks perfectly healthy,
+but the decoded audio level on the receiving end stays pinned at silence.
+This isn't a bug in this codebase, it's a QEMU limitation, and it'll waste
+your time if you try to debug "no audio" starting from two emulators.
+
+Two browser tabs (or two devices, each with `http://<host-LAN-IP>:3002`
+open) don't have this problem — `getUserMedia` captures the real mic. Get a
+real call working there first (steps 2, 4-8, 10 above translate directly:
+sign in with two different user ids, call, accept, watch the "Remote audio
+level" meter move while you speak, mute, hang up) to prove the signaling +
+ICE + TURN + audio pipeline is sound end-to-end, *before* chasing anything
+that looks like an audio bug on an emulator. Physical phones are the other
+reliable option; emulator-to-emulator is the one combination not worth
+trusting for audio specifically.
 
 ### Testing across different networks
 
@@ -284,15 +383,17 @@ networks. To actually validate that:
 ## Already running for you to test against
 
 While building this, `docker compose up -d` was run on this machine
-(`10.10.2.51`): signaling on port 3001, TURN on port 3480 (avoids clashing
-with an unrelated project's coturn on 3478), with `TURN_USERNAME=testuser` /
-`TURN_PASSWORD=testpass`. Both containers have `restart: unless-stopped`, so
-they'll survive a Docker daemon restart. Point your Flutter app's config at
-`10.10.2.51:3001` / `10.10.2.51:3480` if your other computer is on the same
-LAN, to test immediately without deploying anything yourself — no separate
-"start the server" step needed. These are dev/test instances, not meant to
-be left running long-term or exposed beyond your LAN. If your other device
-can't reach either port, check this host's firewall (`ufw`/`iptables`) for
-inbound rules on 3001/tcp and 3480/tcp+udp plus the 49260-49300/udp relay
+(`10.10.2.51`): signaling on port 3001, the web test client on port 3002,
+TURN on port 3480 (avoids clashing with an unrelated project's coturn on
+3478), with `TURN_USERNAME=testuser` / `TURN_PASSWORD=testpass`. All three
+containers have `restart: unless-stopped`, so they'll survive a Docker
+daemon restart. Open `http://10.10.2.51:3002` in a browser for the fastest
+possible test (see "Prefer the web client..." above), or point your Flutter
+app's config at `10.10.2.51:3001` / `10.10.2.51:3480` if your other computer
+is on the same LAN — either way, no separate "start the server" step
+needed. These are dev/test instances, not meant to be left running
+long-term or exposed beyond your LAN. If your other device can't reach any
+of these ports, check this host's firewall (`ufw`/`iptables`) for inbound
+rules on 3001/tcp, 3002/tcp, and 3480/tcp+udp plus the 49260-49300/udp relay
 range — Docker's `network_mode: host` means the containers bind directly to
 the host's real interface, so host firewall rules still apply to them.

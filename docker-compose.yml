@@ -23,3 +23,22 @@ services:
     restart: unless-stopped
     environment:
       - PORT=3001
+
+  web:
+    build:
+      context: ./web-voice-call-client
+      args:
+        # Override with a public https:// origin (proxied to this same
+        # backend on /socket.io) once one is available -- see the "Microphone
+        # access needs a secure context" note in README.md. Falls back to the
+        # plain-http LAN address for local-only testing.
+        VITE_SIGNALING_URL: ${PUBLIC_SIGNALING_URL:-http://${TURN_EXTERNAL_IP}:3001}
+        VITE_TURN_URL: turn:${TURN_EXTERNAL_IP}:${TURN_PORT:-3478}
+        VITE_TURN_USERNAME: ${TURN_USERNAME}
+        VITE_TURN_PASSWORD: ${TURN_PASSWORD}
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      - PORT=3002
