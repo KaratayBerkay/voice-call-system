@@ -20,7 +20,9 @@ Flutter A  ⇄═══════════ WebRTC audio (P2P, via STUN/TURN
 
 ```
 voice-call-system/
+  docker-compose.yml             Brings up both services below together
   nestjs-backend/                 Signaling gateway (this repo, runnable standalone)
+    Dockerfile
     src/modules/calls/
       call.gateway.ts             WebSocket events, routes messages
       call.service.ts             Call state machine, socket <-> userId registry
@@ -28,7 +30,7 @@ voice-call-system/
       dto/                        class-validator payload shapes
       interfaces/call.interface.ts
   coturn/
-    docker-compose.yml            TURN/STUN relay
+    .env                          Real values (gitignored); .env -> here via root symlink
     .env.example                  Copy to .env; see local vs VPS guidance inside
   flutter-voice-call-feature/     Standalone Dart package -- copy lib/features/voice_call
     lib/features/voice_call/      into your app, or add this as a local path dependency
@@ -49,7 +51,31 @@ Flutter side must use `socket_io_client` to match — a plain `WebSocket`/
 
 ## Setup
 
-### 1. Signaling server
+### 1. Signaling server + TURN/STUN (docker compose)
+
+```bash
+cp coturn/.env.example coturn/.env
+# edit coturn/.env -- see the comments inside for local-dev vs VPS values
+ln -s coturn/.env .env   # lets docker compose interpolate ${TURN_*} in the command
+docker compose up -d --build
+```
+
+This builds the NestJS gateway into a container and starts it alongside
+coturn, both on `network_mode: host` so they bind directly to the machine's
+real network interface (needed for coturn's wide UDP relay port range, and
+convenient for the gateway too — no per-port mapping to keep in sync).
+
+`docker compose logs -f backend` / `docker compose logs -f turn` to watch
+either service; `docker compose down` to stop both.
+
+**Note:** the `${TURN_LISTENING_IP}`-style variables in `docker-compose.yml`
+are resolved by Compose itself from a `.env` file *next to the compose file*
+-- the `env_file: ./coturn/.env` line on the `turn` service only injects
+those vars into the *container's* runtime environment, which happens too
+late for the `command:` list. Hence the symlink above; don't skip it or
+coturn silently starts with a blank `--relay-ip=`.
+
+#### Alternative: run the signaling server without Docker
 
 ```bash
 cd nestjs-backend
@@ -60,16 +86,8 @@ PORT=3001 npm start
 npm run start:dev
 ```
 
-### 2. TURN/STUN (coturn)
-
-```bash
-cd coturn
-cp .env.example .env
-# edit .env -- see the comments inside for local-dev vs VPS values
-docker compose up -d
-```
-
-**Read the comments in `.env.example` before starting.** The short version:
+**Either way, read the comments in `coturn/.env.example` before starting.**
+The short version:
 `TURN_LISTENING_IP` and `TURN_RELAY_IP` must be a real, routable interface
 address (your machine's LAN IP for local dev, or the VPS's interface for
 production) — **not** `127.0.0.1` or `localhost`. A relay socket bound to
@@ -211,29 +229,29 @@ SDP contents.
 
 ## Testing procedure
 
-1. `cd nestjs-backend && npm run start:dev`
-2. `cd coturn && docker compose up -d`
-3. Run the Flutter app on device/emulator A, sign in as user A.
-4. Run the Flutter app on device/emulator B, sign in as user B.
-5. On A, enter B's user id and tap Call.
-6. B should see the incoming-call screen within ~1s.
-7. Tap Accept on B.
-8. Both sides should reach `connected` within a few seconds; speak into each
+1. `docker compose up -d --build` (from the repo root — starts both the
+   signaling server and coturn; see Setup above)
+2. Run the Flutter app on device/emulator A, sign in as user A.
+3. Run the Flutter app on device/emulator B, sign in as user B.
+4. On A, enter B's user id and tap Call.
+5. B should see the incoming-call screen within ~1s.
+6. Tap Accept on B.
+7. Both sides should reach `connected` within a few seconds; speak into each
    mic and confirm you hear the other side.
-9. Tap Mute on A; confirm B stops hearing A (A still hears B).
-10. Tap Speaker on either side; confirm output routes to the loudspeaker vs
-    earpiece.
-11. Tap End Call on either side; both should return to idle.
-12. Repeat the call (register/re-invite cleanly — the userActiveCall map
-    should be free after step 11's cleanup).
-13. Call again and have B tap Reject; A should see `callRejected` and return
+8. Tap Mute on A; confirm B stops hearing A (A still hears B).
+9. Tap Speaker on either side; confirm output routes to the loudspeaker vs
+   earpiece.
+10. Tap End Call on either side; both should return to idle.
+11. Repeat the call (register/re-invite cleanly — the userActiveCall map
+    should be free after step 10's cleanup).
+12. Call again and have B tap Reject; A should see `callRejected` and return
     to idle.
-14. Call again and have A tap Cancel before B answers; B's incoming-call
+13. Call again and have A tap Cancel before B answers; B's incoming-call
     screen should disappear.
-15. Mid-call, force-quit one app (or kill its process) — the other side
+14. Mid-call, force-quit one app (or kill its process) — the other side
     should get `call:hangup` (`peer_disconnected`) and return to idle within
     a couple seconds.
-16. Toggle airplane mode/WiFi off on one device to break its WebSocket, then
+15. Toggle airplane mode/WiFi off on one device to break its WebSocket, then
     back on — reconnect and confirm a fresh call can be placed afterward
     (the busy state should have been released by the disconnect handler).
 
@@ -265,11 +283,16 @@ networks. To actually validate that:
 
 ## Already running for you to test against
 
-While building this, the signaling server and a test coturn instance were
-started on this machine (`10.10.2.51`): signaling on port 3001, TURN on port
-3480 (avoids clashing with an unrelated project's coturn on 3478), with
-`TURN_USERNAME=testuser` / `TURN_PASSWORD=testpass`. Point your Flutter app's
-config at `10.10.2.51:3001` / `10.10.2.51:3480` if your other computer is on
-the same LAN, to test immediately without deploying anything yourself. These
-are dev/test instances, not meant to be left running long-term or exposed
-beyond your LAN.
+While building this, `docker compose up -d` was run on this machine
+(`10.10.2.51`): signaling on port 3001, TURN on port 3480 (avoids clashing
+with an unrelated project's coturn on 3478), with `TURN_USERNAME=testuser` /
+`TURN_PASSWORD=testpass`. Both containers have `restart: unless-stopped`, so
+they'll survive a Docker daemon restart. Point your Flutter app's config at
+`10.10.2.51:3001` / `10.10.2.51:3480` if your other computer is on the same
+LAN, to test immediately without deploying anything yourself — no separate
+"start the server" step needed. These are dev/test instances, not meant to
+be left running long-term or exposed beyond your LAN. If your other device
+can't reach either port, check this host's firewall (`ufw`/`iptables`) for
+inbound rules on 3001/tcp and 3480/tcp+udp plus the 49260-49300/udp relay
+range — Docker's `network_mode: host` means the containers bind directly to
+the host's real interface, so host firewall rules still apply to them.

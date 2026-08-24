@@ -72,14 +72,27 @@ class WebRTCVoiceCallService {
     _pc = pc;
   }
 
+  int _statsPollCount = 0;
+
   void _startAudioLevelPolling() {
     _audioLevelTimer?.cancel();
+    _statsPollCount = 0;
     _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
       final pc = _pc;
       if (pc == null) return;
+      _statsPollCount++;
+      final verbose = _statsPollCount % 10 == 0; // ~once every 2s
       try {
         final reports = await pc.getStats();
         for (final report in reports) {
+          if (verbose && (report.type == 'outbound-rtp' || report.type == 'inbound-rtp')) {
+            final kind = report.values['kind'] ?? report.values['mediaType'];
+            if (kind == 'audio') {
+              _log('${report.type} bytes=${report.values['bytesReceived'] ?? report.values['bytesSent']} '
+                  'packets=${report.values['packetsReceived'] ?? report.values['packetsSent']} '
+                  'lost=${report.values['packetsLost']} level=${report.values['audioLevel']}');
+            }
+          }
           if (report.type != 'inbound-rtp') continue;
           final kind = report.values['kind'] ?? report.values['mediaType'];
           final level = report.values['audioLevel'];
