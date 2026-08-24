@@ -1,0 +1,18 @@
+services:
+  turn:
+    image: coturn/coturn
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-ip=${TURN_LISTENING_IP}
+      - --relay-ip=${TURN_RELAY_IP}
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --listening-port=${TURN_PORT:-3478}
+      - --min-port=${TURN_MIN_PORT:-49160}
+      - --max-port=${TURN_MAX_PORT:-49200}
+      - --lt-cred-mech
+      - --user=${TURN_USERNAME}:${TURN_PASSWORD}
+      - --realm=${TURN_REALM:-voicecall.local}

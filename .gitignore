@@ -1,0 +1,19 @@
+# Node
+node_modules/
+dist/
+
+# Env secrets
+.env
+
+# Flutter/Dart
+.dart_tool/
+build/
+.packages
+pubspec.lock
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store

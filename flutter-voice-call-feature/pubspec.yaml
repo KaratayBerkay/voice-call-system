@@ -1,0 +1,25 @@
+name: voice_call_feature
+description: >
+  Drop-in 1-to-1 WebRTC voice call feature (WebRTCVoiceCallService +
+  VoiceCallSignalingService + a minimal test UI). Copy lib/features/voice_call
+  into your app, or depend on this as a local path package.
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: ^3.9.0
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_webrtc: ^1.6.0
+  socket_io_client: ^3.1.2
+  permission_handler: ^12.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
